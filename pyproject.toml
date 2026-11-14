@@ -1,0 +1,6 @@
+[project]
+name = "retrofit-savings"
+version = "0.1.0"
+description = "服务设施改造节能核算台"
+requires-python = ">=3.11"
+dependencies = []
