@@ -1,13 +1,42 @@
 <!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>服务设施改造节能核算台</title><link rel="stylesheet" href="/style.css"></head>
-<body><header><span>教研数据 · 复核工作区</span><h1>服务设施改造节能核算台</h1><p>分表能耗与改造事件时间线</p></header>
+<body><header><span>教研数据 · 复核工作区</span><h1>服务设施改造节能核算台</h1><p>分表能耗与改造事件时间线 · 节能核验</p>
+<nav id="tabs"><button class="tab active" data-view="browse">分表资料浏览</button><button class="tab" data-view="verify">节能核验</button></nav></header>
 <main><aside><h2>数据与范围</h2><label>数据版本<select id="revision"></select></label><div id="controls"></div>
 <button id="inspect">查看所选范围</button><label>导入完整数据<input id="upload" type="file" accept=".json,application/json"></label>
 <button id="raw">查看原始记录</button><h2>分析记录</h2><label>记录名称<input id="title" value="本次复核"></label>
-<button id="save">保存当前描述</button><div id="archive"></div></aside>
-<section><div id="status" role="status">正在读取本地数据…</div><div id="summary"></div>
+<button id="save">保存当前描述</button><div id="archive"></div>
+<h2>核验存档</h2><label>核验名称<input id="verify-title" value="本次节能核验"></label>
+<button id="verify-save">保存当前核验情景</button><div id="verify-archive"></div></aside>
+<section><div id="status" role="status">正在读取本地数据…</div>
+<div id="view-browse"><div id="summary"></div>
 <h2>分表能耗与改造事件时间线</h2><div id="notes"></div><canvas id="chart" width="960" height="300" aria-label="所选范围描述图"></canvas>
 <div class="table-wrap"><table><thead id="columns"></thead><tbody id="rows"></tbody></table></div>
-<h2 id="detail-heading">记录与依据</h2><pre id="details">点击记录行可查看详细字段。</pre><button id="export">导出当前记录</button>
-</section></main><footer>仅使用本地虚构记录；描述统计不替代研究设计与业务复核。</footer><script src="/app.js"></script></body></html>
+<h2 id="detail-heading">记录与依据</h2><pre id="details">点击记录行可查看详细字段。</pre><button id="export">导出当前记录</button></div>
+<div id="view-verify" hidden>
+  <div class="verify-controls">
+    <label>核验站点<select id="verify-site"></select></label>
+    <label>基准期起始日（留空取资料最早）<input id="base-start" type="number" placeholder="如 0"></label>
+    <label>基准期结束日（留空取改造前一日）<input id="base-stop" type="number" placeholder="如 239"></label>
+    <label>留时段验证天数<input id="holdout" type="number" value="14" min="7" max="60"></label>
+    <label>情景名称<input id="scenario-label" value="当前情景"></label>
+    <button id="verify-run">运行节能核验</button>
+    <button id="compare-toggle" class="secondary">开启并排情景复核</button>
+  </div>
+  <div id="verdict"></div>
+  <div id="compare-panel" hidden>
+    <h2>并排情景复核</h2>
+    <p class="hint">调整上方假设后运行，即把当前结果固定为情景 A/B；两套假设、合计与阻断依据逐项对照。</p>
+    <div id="compare-grid"></div>
+  </div>
+  <h2>站点合计（总表口径，分表不与总表相加）</h2>
+  <div id="verify-totals"></div>
+  <h2>方法学与阻断依据</h2><div id="verify-blockers"></div><div id="verify-notes"></div>
+  <h2>研究员假设与调整批准</h2><div id="verify-assumptions"></div>
+  <h2>表段钻取（点击展开逐日反事实与计量依据）</h2><div id="verify-meters"></div>
+  <h2>调整台账（例行条件与单独调整分列）</h2><div id="verify-adjustments"></div>
+  <h2>核验留痕</h2><pre id="verify-json">运行核验后显示完整结构化结果。</pre>
+</div>
+</section></main><footer>仅使用本地虚构记录；基线只用改造前资料拟合，报告期用电不参与建模；无法比较时不给出整体节能率。</footer>
+<script src="/app.js"></script></body></html>

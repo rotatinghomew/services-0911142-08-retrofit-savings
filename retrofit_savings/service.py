@@ -3,6 +3,7 @@ import json
 
 from .domain import explore, validate
 from .storage import Store, fingerprint
+from .verification import run_verification, validate_assumptions
 
 
 class Workbench:
@@ -16,7 +17,8 @@ class Workbench:
 
     def context(self):
         return {"product": self.product, "default_revision": self.default_revision,
-                "datasets": self.store.datasets(), "notebooks": self.store.notebooks()}
+                "datasets": self.store.datasets(), "notebooks": self.store.notebooks(),
+                "verifications": self.store.verifications()}
 
     def upload(self, body):
         data = body["data"]
@@ -38,3 +40,29 @@ class Workbench:
     def save(self, body):
         result = self.inspect(body)
         return self.store.save(body.get("title", ""), result["revision"], result["selection"], result)
+
+    def verify(self, body):
+        revision = body.get("revision", self.default_revision)
+        site = body.get("site", self.product["selection"]["site"])
+        if site not in self.product_options("site"):
+            raise ValueError("站点不在资料范围内：" + str(site))
+        assumptions = validate_assumptions(body.get("assumptions") or {})
+        data = self.store.dataset(revision)
+        result = run_verification(data, site, assumptions)
+        digest = fingerprint({"revision": revision, "site": site, "assumptions": assumptions})
+        return {"revision": revision, "site": site, "assumptions": assumptions,
+                "scenario_fingerprint": digest, "verification": result}
+
+    def save_verification(self, body):
+        computed = self.verify(body)
+        title = body.get("title", "")
+        return self.store.save_verification(
+            title, computed["revision"], computed["site"],
+            computed["assumptions"], computed["verification"],
+            computed["scenario_fingerprint"])
+
+    def product_options(self, key):
+        for option in self.product["options"]:
+            if option[0] == key:
+                return option[2]
+        return []

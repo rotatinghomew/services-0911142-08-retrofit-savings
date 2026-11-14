@@ -163,4 +163,390 @@ element('export').onclick = () => guarded(async () => {
   link.href = url; link.download = 'analysis-' + state.current.revision.slice(0, 12) + '.json'; link.click();
   URL.revokeObjectURL(url);
 });
-guarded(async () => { await refresh(); render(await request('/api/explore', selected())); });
+
+/* ---------------- 节能核验视图 ---------------- */
+
+const verifyState = {result: null, scenarios: []};
+
+function fmt(value, digits = 1) {
+  if (value === null || value === undefined) return '未观测';
+  if (typeof value !== 'number') return String(value);
+  if (!Number.isFinite(value)) return '不可计算';
+  return Math.abs(value) >= 1000 ? value.toLocaleString('zh-CN', {maximumFractionDigits: digits})
+    : value.toFixed(digits);
+}
+function pct(value) { return value === null || value === undefined ? '不给出' : (value * 100).toFixed(1) + '%'; }
+
+function card(label, value, hint = '') {
+  const article = document.createElement('article');
+  const title = document.createElement('span'); title.textContent = label;
+  const amount = document.createElement('strong'); amount.textContent = value;
+  article.append(title, amount);
+  if (hint) { const small = document.createElement('small'); small.textContent = hint; article.append(small); }
+  return article;
+}
+
+function verifyPayload() {
+  const approvals = {};
+  for (const control of document.querySelectorAll('.approval-toggle')) {
+    approvals[control.dataset.adjustment] = control.checked;
+  }
+  const windowValue = {};
+  const start = element('base-start').value; const stop = element('base-stop').value;
+  if (start !== '') windowValue.start = Number(start);
+  if (stop !== '') windowValue.stop = Number(stop);
+  return {
+    revision: element('revision').value,
+    site: element('verify-site').value,
+    assumptions: {
+      baseline_window: windowValue,
+      holdout_days: Number(element('holdout').value),
+      approvals,
+      scenario_label: element('scenario-label').value || '当前情景',
+    },
+  };
+}
+
+function renderVerdict(payload) {
+  const v = payload.verification;
+  const box = element('verdict');
+  box.replaceChildren();
+  const banner = document.createElement('div');
+  banner.className = 'verdict ' + (v.comparable ? 'ok' : 'blocked');
+  banner.innerHTML = '<strong>' + (v.comparable ? '可比较：整体节能率有效'
+    : '停止给出整体节能率') + '</strong>';
+  const sub = document.createElement('p');
+  sub.textContent = v.comparable
+    ? '全部覆盖率、留时段验证、外推范围与调整依据通过，整体节能率 ' + pct(v.overall_savings_rate)
+    : '存在 ' + v.blocking_reasons.length + ' 项不可比较依据，下表段数据仍可用于线索排查，但不得汇总为整体节能率。';
+  banner.append(sub);
+  box.append(banner);
+}
+
+function renderTotals(payload) {
+  const t = payload.verification.totals;
+  const wrap = element('verify-totals');
+  if (!t.computable) {
+    wrap.replaceChildren(
+      card('调整后反事实用量 kWh', '不可计算'),
+      card('报告期实际用量 kWh', '不可计算'),
+      card('节省量 kWh', '不可计算'),
+      card('节省率', '不给出', '全部表段模型未建立'),
+      card('节省量95%区间 kWh', '不可计算'),
+      card('调整合计 kWh', '不可计算'),
+    );
+    return;
+  }
+  wrap.replaceChildren(
+    card('调整后反事实用量 kWh', fmt(t.adjusted_counterfactual_kwh), '含已批准单独调整'),
+    card('报告期实际用量 kWh', fmt(t.actual_kwh), '仅总表口径'),
+    card('节省量 kWh', fmt(t.savings_kwh), '反事实 − 实际'),
+    card('节省率', pct(payload.verification.overall_savings_rate), '阻断时不给出'),
+    card('节省量95%区间 kWh', fmt(t.savings_ci95_kwh[0]) + ' ~ ' + fmt(t.savings_ci95_kwh[1])),
+    card('调整合计 kWh', fmt(t.adjustment_kwh)),
+  );
+}
+
+function renderBlockers(payload) {
+  const v = payload.verification;
+  const wrap = element('verify-blockers');
+  wrap.replaceChildren();
+  if (!v.blocking_reasons.length) {
+    const ok = document.createElement('p'); ok.className = 'ok-text';
+    ok.textContent = '无阻断项：覆盖率、留时段验证、外推范围与调整估计均满足可比较要求。';
+    wrap.append(ok);
+  } else {
+    const list = document.createElement('ul');
+    for (const reason of v.blocking_reasons) {
+      const item = document.createElement('li');
+      const scope = reason.meter_id ? '[' + reason.meter_id + '] ' : reason.adjustment ? '[' + reason.adjustment + '] ' : '';
+      item.textContent = scope + reason.reason;
+      list.append(item);
+    }
+    wrap.append(list);
+  }
+  const notes = element('verify-notes');
+  notes.replaceChildren();
+  for (const note of v.method_notes) {
+    const p = document.createElement('p'); p.className = 'hint'; p.textContent = note; notes.append(p);
+  }
+}
+
+function renderAssumptions(payload) {
+  const v = payload.verification;
+  const wrap = element('verify-assumptions');
+  wrap.replaceChildren();
+  const a = payload.assumptions;
+  const lines = [
+    ['情景名称', a.scenario_label],
+    ['基准期窗口', JSON.stringify(a.baseline_window) + '（资料范围 ' + v.periods.baseline.start + '–' + v.periods.baseline.stop + '）'],
+    ['留时段验证天数', a.holdout_days],
+    ['情景指纹', payload.scenario_fingerprint.slice(0, 16) + '…（同数据+同假设可复现）'],
+    ['数据版本', payload.revision.slice(0, 12) + '…'],
+  ];
+  const table = document.createElement('table');
+  for (const [k, value] of lines) {
+    const tr = document.createElement('tr');
+    const th = document.createElement('th'); th.textContent = k;
+    const td = document.createElement('td'); td.textContent = value;
+    tr.append(th, td); table.append(tr);
+  }
+  wrap.append(table);
+}
+
+function renderMeters(payload) {
+  const wrap = element('verify-meters');
+  wrap.replaceChildren();
+  for (const meter of payload.verification.meters) {
+    const block = document.createElement('details');
+    const summary = document.createElement('summary');
+    summary.textContent = meter.meter_id + ' · ' + meter.boundary +
+      (meter.sub_of ? '（分表，隶属 ' + meter.sub_of + '）' : '（总表）') +
+      ' — ' + (meter.model_status === 'fitted' ? '模型已建立' : '模型失败：' + meter.model_message);
+    block.append(summary);
+    if (meter.model_status !== 'fitted') {
+      const p = document.createElement('p'); p.className = 'error-text'; p.textContent = meter.model_message;
+      block.append(p);
+      const cover = document.createElement('ul');
+      const li = document.createElement('li');
+      li.textContent = '基准期覆盖 ' + (meter.baseline_coverage.measured_share * 100).toFixed(1) +
+        '%，报告期覆盖 ' + (meter.report_coverage.measured_share * 100).toFixed(1) + '%';
+      cover.append(li); block.append(cover);
+      wrap.append(block);
+      continue;
+    }
+    const cards = document.createElement('div'); cards.className = 'mini-cards';
+    cards.append(
+      card('反事实 kWh', fmt(meter.counterfactual.total_kwh)),
+      card('调整后反事实 kWh', fmt(meter.counterfactual.adjusted_total_kwh)),
+      card('实际 kWh', fmt(meter.actual.observed_total_kwh)),
+      card('节省量 kWh', fmt(meter.savings.kwh)),
+      card('表段节省率', pct(meter.savings.rate)),
+      card('节省标准差 kWh', fmt(meter.savings.std_kwh)),
+    );
+    block.append(cards);
+
+    const diag = document.createElement('ul');
+    const diagItems = [
+      '留时段验证 CV：' + (meter.holdout.cv * 100).toFixed(1) + '%（限值 ' +
+        (meter.holdout.limit_cv * 100).toFixed(0) + '%），' + (meter.holdout.passed ? '通过' : '未通过'),
+      '残差标准差 ' + fmt(meter.residuals.sigma_kwh) + ' kWh，AR(1) 自相关 ' + meter.ar1_phi.toFixed(3) +
+        '，异常残差 ' + meter.residuals.outliers.length + ' 个',
+      '外推天数 ' + meter.counterfactual.extrapolated_days.length + ' / ' + meter.actual.calendar_days +
+        '（' + (meter.counterfactual.extrapolation_ratio * 100).toFixed(1) + '%）',
+      '基准期覆盖 ' + (meter.baseline_coverage.measured_share * 100).toFixed(1) +
+        '%，报告期覆盖 ' + (meter.report_coverage.measured_share * 100).toFixed(1) + '%，' +
+        '重置日 ' + JSON.stringify(meter.report_coverage.reset_days) + '，缺测日 ' + JSON.stringify(meter.report_coverage.missing_days),
+    ];
+    for (const text of diagItems) { const li = document.createElement('li'); li.textContent = text; diag.append(li); }
+    block.append(diag);
+
+    const coef = document.createElement('table');
+    const head = document.createElement('tr');
+    for (const h of ['模型项', '系数', '标准误']) { const th = document.createElement('th'); th.textContent = h; head.append(th); }
+    coef.append(head);
+    for (const item of meter.coefficients) {
+      const tr = document.createElement('tr');
+      tr.innerHTML = '<td>' + item.label + '</td><td>' + fmt(item.coefficient, 3) + '</td><td>' +
+        fmt(item.std_error, 3) + '</td>';
+      coef.append(tr);
+    }
+    block.append(coef);
+
+    const daily = document.createElement('table');
+    const dhead = document.createElement('tr');
+    for (const h of ['日', '温度', '时长', '人数', '反事实', '实际', '参数σ', '过程σ', '外推']) {
+      const th = document.createElement('th'); th.textContent = h; dhead.append(th);
+    }
+    daily.append(dhead);
+    for (const row of meter.counterfactual.daily) {
+      const tr = document.createElement('tr');
+      tr.innerHTML = '<td>' + row.day + '</td><td>' + fmt(row.temperature, 2) + '</td><td>' +
+        fmt(row.service_hours, 0) + '</td><td>' + fmt(row.users, 0) + '</td><td>' +
+        fmt(row.counterfactual_kwh) + '</td><td>' + (row.observed ? fmt(row.actual_kwh) : '缺测') +
+        '</td><td>' + fmt(row.param_std_kwh) + '</td><td>' + fmt(row.process_std_kwh) + '</td><td>' +
+        (row.outside_support ? row.outside_terms.join(',') : '范围内') + '</td>';
+      daily.append(tr);
+    }
+    block.append(daily);
+
+    const meterRows = document.createElement('table');
+    const mhead = document.createElement('tr');
+    for (const h of ['日', '状态', '倍率', '表盘原始差分', '规范化 kWh']) {
+      const th = document.createElement('th'); th.textContent = h; mhead.append(th);
+    }
+    meterRows.append(mhead);
+    for (const row of meter.daily_metering) {
+      const tr = document.createElement('tr');
+      tr.innerHTML = '<td>' + row.day + '</td><td>' + row.status + '</td><td>' + row.multiplier +
+        '</td><td>' + displayValue(row.raw_delta) + '</td><td>' + displayValue(row.kwh) + '</td>';
+      meterRows.append(tr);
+    }
+    block.append(meterRows);
+    wrap.append(block);
+  }
+}
+
+function renderAdjustments(payload) {
+  const wrap = element('verify-adjustments');
+  wrap.replaceChildren();
+  const intro = document.createElement('p');
+  intro.className = 'hint';
+  intro.textContent = '例行计量条件（倍率、换表重置、序列水平漂移）已在计量规范化与基线模型中处理，不在此台账；' +
+    '下列均为需要业务判断的单独调整。勾选框为研究员的批准覆盖，运行核验后生效并留痕。';
+  wrap.append(intro);
+  const table = document.createElement('table');
+  const head = document.createElement('tr');
+  for (const h of ['调整编号', '类型', '窗口', '入账表段', '资料批准', '研究员批准', '日均影响', '累计影响', '状态依据']) {
+    const th = document.createElement('th'); th.textContent = h; head.append(th);
+  }
+  table.append(head);
+  const seen = new Set();
+  for (const row of payload.verification.adjustment_ledger) {
+    const key = row.adjustment + (row.meter_id || '');
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const tr = document.createElement('tr');
+    const toggleId = 'approval-' + row.adjustment;
+    tr.innerHTML = '<td>' + row.adjustment + '</td><td>' + row.kind_label + '</td><td>' + row.start +
+      '–' + row.stop + '</td><td>' + (row.meter_id || '无对应表段') + '</td><td>' +
+      (row.approved && row.basis === 'dataset' ? '是' : '否') + '</td><td></td><td>' +
+      displayValue(row.daily_impact_kwh) + '</td><td>' + displayValue(row.total_impact_kwh) +
+      '</td><td>' + row.note + '</td>';
+    const toggleCell = tr.children[5];
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox'; checkbox.className = 'approval-toggle';
+    checkbox.dataset.adjustment = row.adjustment;
+    checkbox.checked = row.approved;
+    toggleCell.append(checkbox);
+    table.append(tr);
+  }
+  wrap.append(table);
+}
+
+function renderVerification(payload) {
+  verifyState.result = payload;
+  renderVerdict(payload);
+  renderTotals(payload);
+  renderBlockers(payload);
+  renderAssumptions(payload);
+  renderMeters(payload);
+  renderAdjustments(payload);
+  element('verify-json').textContent = JSON.stringify(payload, null, 2);
+  message('节能核验完成 · 情景 ' + payload.assumptions.scenario_label +
+    ' · 数据 ' + payload.revision.slice(0, 12));
+}
+
+function snapshotScenario(payload) {
+  const t = payload.verification.totals;
+  return {
+    label: payload.assumptions.scenario_label,
+    fingerprint: payload.scenario_fingerprint,
+    assumptions: payload.assumptions,
+    comparable: payload.verification.comparable,
+    rate: payload.verification.overall_savings_rate,
+    computable: payload.verification.totals.computable,
+    totals: t,
+    blockers: payload.verification.blocking_reasons,
+  };
+}
+
+function renderCompare() {
+  const grid = element('compare-grid');
+  grid.replaceChildren();
+  if (verifyState.scenarios.length < 2) {
+    const p = document.createElement('p'); p.className = 'hint';
+    p.textContent = '当前已固定 ' + verifyState.scenarios.length + ' 个情景，再运行一次不同假设即可并排。';
+    grid.append(p);
+    return;
+  }
+  const pair = verifyState.scenarios.slice(-2);
+  const numericOrNa = getter => s => (s.computable ? getter(s) : '不可计算');
+  const rows = [
+    ['情景名称', s => s.label],
+    ['情景指纹', s => s.fingerprint.slice(0, 16) + '…'],
+    ['基准期窗口', s => JSON.stringify(s.assumptions.baseline_window)],
+    ['留时段天数', s => s.assumptions.holdout_days],
+    ['批准覆盖', s => JSON.stringify(s.assumptions.approvals)],
+    ['可比较', s => s.comparable ? '是' : '否（停止给出整体节能率）'],
+    ['整体节能率', s => pct(s.rate)],
+    ['调整后反事实 kWh', numericOrNa(s => fmt(s.totals.adjusted_counterfactual_kwh))],
+    ['实际 kWh', numericOrNa(s => fmt(s.totals.actual_kwh))],
+    ['节省量 kWh', numericOrNa(s => fmt(s.totals.savings_kwh))],
+    ['节省95%区间', numericOrNa(s => fmt(s.totals.savings_ci95_kwh[0]) + ' ~ ' + fmt(s.totals.savings_ci95_kwh[1]))],
+    ['阻断项', s => String(s.blockers.map(b => b.reason).join('；') || '无')],
+  ];
+  const table = document.createElement('table');
+  for (const [label, getter] of rows) {
+    const tr = document.createElement('tr');
+    const th = document.createElement('th'); th.textContent = label;
+    const a = document.createElement('td'); a.textContent = getter(pair[0]);
+    const b = document.createElement('td'); b.textContent = getter(pair[1]);
+    tr.append(th, a, b); table.append(tr);
+  }
+  grid.append(table);
+}
+
+function initVerifyControls() {
+  const select = element('verify-site');
+  if (!select.children.length) {
+    const siteOption = state.context.product.options.find(option => option[0] === 'site');
+    for (const choice of siteOption[2]) {
+      const option = document.createElement('option');
+      option.value = choice; option.textContent = choice;
+      select.append(option);
+    }
+    select.value = state.context.product.selection.site;
+  }
+}
+
+async function refreshVerifyArchive() {
+  const archive = element('verify-archive');
+  archive.replaceChildren();
+  for (const item of state.context.verifications || []) {
+    const button = document.createElement('button');
+    button.textContent = item.title + ' #' + item.id;
+    button.onclick = () => guarded(async () => {
+      const saved = await request('/api/verifications/' + item.id);
+      const payload = {
+        revision: saved.revision, site: saved.site, assumptions: saved.assumptions,
+        scenario_fingerprint: saved.fingerprint, verification: saved.result,
+      };
+      element('revision').value = saved.revision;
+      element('verify-site').value = saved.site;
+      renderVerification(payload);
+    });
+    archive.append(button);
+  }
+}
+
+element('verify-run').onclick = () => guarded(async () => {
+  const payload = await request('/api/verify', verifyPayload());
+  renderVerification(payload);
+  verifyState.scenarios.push(snapshotScenario(payload));
+  renderCompare();
+});
+element('compare-toggle').onclick = () => {
+  const panel = element('compare-panel');
+  panel.hidden = !panel.hidden;
+  element('compare-toggle').textContent = panel.hidden ? '开启并排情景复核' : '收起并排情景复核';
+};
+element('verify-save').onclick = () => guarded(async () => {
+  if (!verifyState.result) throw new Error('请先运行一次节能核验');
+  const body = {...verifyPayload(), title: element('verify-title').value};
+  const saved = await request('/api/verifications', body);
+  await refresh();
+  await refreshVerifyArchive();
+  message('已保存核验情景 #' + saved.id);
+});
+
+for (const tab of document.querySelectorAll('.tab')) {
+  tab.onclick = () => {
+    document.querySelectorAll('.tab').forEach(item => item.classList.toggle('active', item === tab));
+    element('view-browse').hidden = tab.dataset.view !== 'browse';
+    element('view-verify').hidden = tab.dataset.view !== 'verify';
+    if (tab.dataset.view === 'verify') initVerifyControls();
+  };
+}
+
+guarded(async () => { await refresh(); render(await request('/api/explore', selected())); initVerifyControls(); refreshVerifyArchive(); });

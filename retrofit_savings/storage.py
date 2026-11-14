@@ -39,6 +39,13 @@ class Store:
                     revision TEXT NOT NULL REFERENCES datasets(revision),
                     selection TEXT NOT NULL, result TEXT NOT NULL, created_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS verifications (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL,
+                    revision TEXT NOT NULL REFERENCES datasets(revision),
+                    site TEXT NOT NULL, assumptions TEXT NOT NULL,
+                    result TEXT NOT NULL, fingerprint TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
             """)
 
     @contextmanager
@@ -100,4 +107,33 @@ class Store:
         for field in ["selection", "result"]:
             result[field] = json.loads(result[field])
         result["dataset"] = self.dataset(result["revision"])
+        return result
+
+    def save_verification(self, title, revision, site, assumptions, result, digest):
+        if not isinstance(title, str) or not title.strip() or len(title) > 160:
+            raise ValueError("核验名称应为1至160字")
+        with self.connection() as connection:
+            if connection.execute("SELECT 1 FROM datasets WHERE revision=?", (revision,)).fetchone() is None:
+                raise LookupError("数据版本不存在")
+            cursor = connection.execute(
+                "INSERT INTO verifications(title,revision,site,assumptions,result,fingerprint,created_at)"
+                " VALUES(?,?,?,?,?,?,?)",
+                (title.strip(), revision, site, encode(assumptions), encode(result), digest,
+                 datetime.now(timezone.utc).isoformat()))
+            identifier = cursor.lastrowid
+        return self.verification(identifier)
+
+    def verifications(self):
+        with self.connection() as connection:
+            return [dict(row) for row in connection.execute(
+                "SELECT id,title,revision,site,fingerprint,created_at FROM verifications ORDER BY id DESC")]
+
+    def verification(self, identifier):
+        with self.connection() as connection:
+            row = connection.execute("SELECT * FROM verifications WHERE id=?", (identifier,)).fetchone()
+        if row is None:
+            raise LookupError("核验记录不存在")
+        result = dict(row)
+        for field in ["assumptions", "result"]:
+            result[field] = json.loads(result[field])
         return result
